@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="ja">
+<!–
+/*****************************************************************************
+*
+*	MapTimelineView.html -- Googleマップからエクスポートしたタイムラインを表示
+*
+*	rev1.0	2025/03/12	initial revision by	Toshi
+*
+*****************************************************************************/
+->
+<script>
+	// これ↓の""の中に取得したYahoo!ClientIDをペーストしてください
+	const APPID = "";
+</script>
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" +
+				"initial-scale=1.0, maximum-scale=1.0, user-scalable=no" >
+	<title>MapTimelineView</title>
+	<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+	<link rel=
+	  "stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+	<script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+</head>
+
+<style>
+	/* CSSのコメントには//は使えない */
+	body {
+		display: flex;
+		margin: 0;
+		height: 100vh;
+		font-family: Arial, sans-serif;
+	}
+	#ui-area {
+		width: 256px;
+		background: #f8f8f8;
+		padding: 10px;
+		box-sizing: border-box;
+		display: flex;
+		flex-direction: column;
+	}
+	#map-area {
+		flex-grow: 1;
+		border-left: 1px solid #000;
+	}
+	button, select, input {
+		width: 32%;
+		margin: 2px;
+		text-align: center;
+	}
+	#year, #month {
+	font-weight: bold; /* 太字にする */
+	}
+	#year {
+		width: 28%;
+	}
+	#month {
+		width: 20%;
+	}
+	#load-json {
+		width: 100%;
+		margin-bottom: 10px;
+	}
+	#calendar-ctrl {
+		width: 100%;
+		margin: 0;
+		padding-top: 5px;
+		height: 30px;
+		background-color: #FFFFE0;
+	}
+	#calendar {
+		width: 100%;
+		border-collapse: collapse;
+		text-align: center;
+		background-color: #FFFFE0;
+	}
+	#calendar-bottom {
+		width: 100%;
+		margin: 0;
+		height: 10px;
+		background-color: #FFFFE0;
+	}
+	#calendar th, #calendar td {
+		text-align: center;
+		padding: 5px;
+	}
+	.selected-day {
+		position: relative; /* 疑似要素の基準位置 */
+	}
+	.selected-day::after {
+		content: ""; 
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		width: 30px;  /* 円のサイズ */
+		height: 30px; /* 円のサイズ */
+		border: 2px solid red; /* 赤い枠線 */
+		border-radius: 50%; /* 真円にする */
+		transform: translate(-50%, -50%); /* 中央配置 */
+		pointer-events: none; /* クリックを邪魔しない */
+	}
+	#list-box {
+		flex-grow: 1;
+		overflow-y: auto;
+		overflow-x: auto;
+		border: 1px solid black;
+		padding: 5px;
+		margin-top: 10px;
+		font-size: 14px;
+		white-space: nowrap;
+	}
+	.list-item {
+		display: block; /* 背景色がしっかり適用されるように */
+		min-width: 300%;  /* 背景色を横スクロール時も描画 */
+	}
+	.circle {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+	border-radius: 50%;
+		background-color: rgba(0,0, 255, 0.2); !important;
+		transform: translate(-50%, -50%);
+		pointer-events: none; /* クリックを邪魔しない */
+		z-index: 1; /* 数字より後ろに配置 */
+	}
+	td {
+		position: relative;
+		text-align: center;
+		font-weight: normal; /* 数字を通常の太さにする */
+		z-index: 2; /* 円より前に表示 */
+	}
+</style>
+
+<body>
+	<div id="ui-area">
+		<button id="load-json">jsonファイル読み込み</button>
+		<input type="file" id="file-input" style="display:none;" />
+		<div id="calendar-ctrl">
+			<div style="display: flex; justify-content: space-between;">
+				<button id="prev-month">前の月</button>
+				<select id="year"></select>
+				<select id="month"></select>
+				<button id="next-month">次の月</button>
+			</div>
+		</div>
+		<table id="calendar"></table>
+		<div id="calendar-bottom"></div>
+		<div id="list-box"></div>
+	</div>
+	<div id="map-area"></div>
+</body>
+	
+<script>
+//----------------------------------------------------------------------------
+$(function () {
+
+	let lastFolder = localStorage.getItem("lastFolder") || "";
+	let zoomLevel = 5;
+	let selectedDate = null;
+	let jsonData = [];	// JSONデータ
+	let Distance = [];	// 各日付ごとの総移動距離[m]
+	let Timeline = [];	// タイムライン
+	let Actions = [];	// visit/activity情報
+	let polylineLayers = []; // 描画した線のレイヤ
+	let visitLayers = [];	// 描画した訪問地のレイヤ
+	let firstDay;
+	let lastDay;
+	let today = new Date();
+	let currentYear = today.getFullYear();
+	let currentMonth = today.getMonth() + 1;
+	let fDrawLater;		// visitポイントを後で描画するフラグ
+	// 線種ごとの色設定
+	const colorMap =
+			{ 0:"black", 1:"blue", 2:"green", 3:"purple", 4:"red" };
+
+	// 年月ボックスのアップデート
+	updateDropdowns();
+
+	// カレンダーの表示
+	generateCalendar(currentYear, currentMonth);
+
+	// Leafletマップの初期化
+	let map =
+		L.map("map-area").setView([35.6895, 139.6917], zoomLevel);
+	L.tileLayer(
+	 "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+
+//----------------------------------------------------------------------------
+
+// ファイルロードボタンのクリック
+$("#load-json").click(function() {
+	let fileInput = $("<input>", { type: "file", accept: ".json" });
+	if (lastFolder) {
+		// 可能なら前回のフォルダを設定
+		fileInput.attr("nwworkingdir", lastFolder);
+	}
+	fileInput.trigger("click");
+
+	fileInput.change(function(event) {
+		let file = event.target.files[0];
+		if (file) {
+			console.log("選択されたファイル:", file.name);
+			lastFolder = file.webkitRelativePath ?
+				file.webkitRelativePath.replace(/\/[^\/]+$/, '') : "";
+			readJsonFile(file);
+		}
+	});
+});
+// 年と月の変更イベントをリッスン
+$("#year, #month").change(function() {
+	currentYear = parseInt($("#year").val());
+	currentMonth = parseInt($("#month").val());
+	generateCalendar(currentYear, currentMonth);	// カレンダーの表示
+});
+// 前の月ボタンのクリック
+$("#prev-month").click(() => {
+	if (currentMonth === 1) { currentMonth = 12; currentYear--; }
+	else { currentMonth--; }
+	generateCalendar(currentYear, currentMonth);	// カレンダーの表示
+	$("#year").val(currentYear);
+	$("#month").val(currentMonth);
+});
+// 次の月ボタンのクリック
+$("#next-month").click(() => {
+	if (currentMonth === 12) { currentMonth = 1; currentYear++; }
+	else { currentMonth++; }
+	generateCalendar(currentYear, currentMonth);	// カレンダーの表示
+	$("#year").val(currentYear);
+	$("#month").val(currentMonth);
+});
+// カレンダーの日付をクリック
+$("#calendar").on("click", "td", function() {
+	if ($(this).text() !== "") {
+		$("td").removeClass("selected-day");
+		$(this).addClass("selected-day");
+		selectedDate = $(this).data("date");
+
+		TimeLineDisplay();	// タイムラインの表示
+	}
+});
+// ウインドゥをリサイズした時(なくても動くが再描画までのタイムラグが減る)
+$(window).resize(function() {
+	map.invalidateSize();
+});
+//----------------------------------------------------------------------------
+// jsonファイル読み込み
+function readJsonFile(file) {
+	let reader = new FileReader();
+	reader.onload = function(event) {
+		jsonData = JSON.parse(event.target.result);
+		console.log("読み込んだJSON:", jsonData);
+		const seg = jsonData.semanticSegments || [];
+		// 最後のendTimeを取得
+		const lastEndTime = jsonData.semanticSegments[
+					jsonData.semanticSegments.length - 1].endTime;
+		// Dateオブジェクトを作成
+		const date = new Date(lastEndTime);
+		// 年と月を取得
+		currentYear = date.getFullYear();
+		currentMonth = date.getMonth() + 1;
+		$("#year").val(currentYear);
+		$("#month").val(currentMonth);
+		generateCalendar(currentYear, currentMonth);	// カレンダーの表示
+	};
+	reader.readAsText(file);
+	//testTimeLineDisplay();
+}
+// カレンダーの表示
+function generateCalendar(year, month) {
+	firstDay = new Date(year, month - 1, 1).getDay();
+	lastDate = new Date(year, month, 0).getDate();
+	let html = "<tr><th>日</th><th>月</th><th>火</th><th>水</th><th>木</th>"+
+			   "<th>金</th><th>土</th></tr><tr>";
+
+	for (let i = 0; i < firstDay; i++) html += "<td></td>";
+
+	for (let d = 1; d <= lastDate; d++) {
+		if ((firstDay + d - 1) % 7 === 0) html += "</tr><tr>";
+		let dateStr = `${year}-${month}-${d}`;
+		html += `<td data-date="${dateStr}" style="position: relative;">`+
+				`${d}</td>`;
+	}
+	html += "</tr>";
+	$("#calendar").html(html);
+	GetTotalDistance();
+	applyCircleMarkers();
+	if (selectedDate) {
+		$(`td[data-date='${selectedDate}']`).addClass("selected-day");
+	}
+}
+// 各日ごとの総移動距離に応じた大きさの円を描く
+function applyCircleMarkers() {
+	$(".circle").remove(); // 既存の円を削除
+	Distance.forEach(item => {
+		let cell = $(`td[data-date='${item.date}']`);
+		if (cell.length > 0 && item.value) {
+			let value =  10 + item.value / 5000;
+			let size = Math.min(28, value); // 値に応じた円のサイズ
+			let color = "rgba(0,0, 255, 0.2)";
+				let circle = `<div class="circle" style="width: ${size}px; `+
+							`height: ${size}px; `+
+							`background-color: ${color};"></div>`;
+			cell.append(circle);
+		}
+	});
+}
+// 年月ボックスのアップデート
+function updateDropdowns() {
+	$("#year").html("");
+	$("#month").html("");
+	for (let y = 2010; y <= 2035; y++) {
+		$("#year").append(`<option value="${y}">${y}</option>`);
+	}
+	for (let m = 1; m <= 12; m++) {
+		$("#month").append(`<option value="${m}">${m}</option>`);
+	}
+	$("#year").val(currentYear);
+	$("#month").val(currentMonth);
+}
+// 年月日を秒に変換
+function ToSec(dateTimeStr) {
+
+	// Dateオブジェクトに変換
+	let date = new Date(dateTimeStr);
+
+	// 1970-01-01からの経過秒数を計算
+	let seconds = Math.floor(date.getTime() / 1000);
+
+	return seconds;
+}
+// 日付文字列を正規化し、"YYYY-MM-DD" 形式に変換
+function normalizeDate(dateString) {
+	let date = new Date(dateString);
+	let year = date.getFullYear();
+	let month = String(date.getMonth() + 1).padStart(2, '0');
+	let day = String(date.getDate()).padStart(2, '0');
+	return `${year}-${month}-${day}`;
+}
+// jsonデータの解析
+function ParseData() {
+	// 初期化
+	Timeline = [];	// jsonのその日のtimelinePathを格納するオブジェクト配列
+	Actions = [];	// jsonのその日のvisitとactivityを格納するオブジェクト配列
+
+	// jsonDataが空または未定義の場合は、処理を終了する
+	if (!jsonData || !jsonData.semanticSegments ||
+			jsonData.semanticSegments.length === 0) {
+		return;
+	}
+
+	const segments = jsonData.semanticSegments || [];
+	const targetdateStr = normalizeDate(selectedDate);
+	let laststime, lastetime;
+	let lastvisit = [];
+	let lastsdate;
+	let lastedate;
+	let tcount = 0;
+	let acount = 0;
+
+	// jsonのsemanticSegmentsをループ
+	segments.forEach(segment => {
+		const timelinePath = segment.timelinePath || [];
+
+		// jsonのtimelinePath をループ
+		timelinePath.forEach(path => {
+			const dateStr = path.time.split("T")[0];
+			if (dateStr === targetdateStr) {	// 目的の日付か？
+				// 日時を秒に直しておく
+				const time = ToSec(path.time.split(".")[0]);
+				const [lat, lng] =
+					path.point.split("°, ").map(coord => parseFloat(coord));
+				// Timelineに追加
+				Timeline.push({time:time, lat:lat, lng:lng, col:1});
+				tcount++;	// Timelineのオブジェクト数++
+	  		}
+		});
+		// visitまたはactivityなら
+		if (segment.visit || segment.activity) {
+			const sdate = segment.startTime.split("T")[0];
+			const edate = segment.endTime.split("T")[0];
+			if (segment.visit && sdate < targetdateStr) {
+				lastvisit = segment.visit;	// 前日までの最後の訪問地
+				lastsdate = sdate;
+				lastedate = edate;
+			}
+			// 当日のデーターか？
+			if (sdate === targetdateStr || edate === targetdateStr) {
+				// start/end時間を取得
+				const stime = ToSec(segment.startTime.split(".")[0]);
+				const etime = ToSec(segment.endTime.split(".")[0]);
+				// visitなら
+				// 同じデータが2回あることがある
+				if (segment.visit &&
+					laststime !== stime && lastetime !== etime) {
+					const [lat, lng] =
+						segment.visit.topCandidate.placeLocation.latLng.
+							split("°, ").map(coord => parseFloat(coord));
+					const txt = segment.visit.topCandidate.semanticType;
+					// Actionsに追加
+					Actions.push({stime:stime, etime:etime,
+									act:0, txt:txt, lat:lat, lng:lng, col:1});
+					acount++;	// Actionsのオブジェクト数++
+					// Timelineに追加
+					if (Actions.lengh) { //初回なら
+						// Timelineにはendtimeを追加
+						Timeline.push({time:etime, lat:lat, lng:lng, col:1});
+					} else {	// Timelineにはstarttimeを追加
+						Timeline.push({time:stime, lat:lat, lng:lng, col:1});
+					}
+					laststime = stime;
+					lastetime = etime;
+				}
+				// activityなら
+				else if (segment.activity) {
+					const [slat, slng] =
+						segment.activity.start.latLng.
+							split("°, ").map(coord => parseFloat(coord));
+					const [elat, elng] =
+						segment.activity.end.latLng.
+							split("°, ").map(coord => parseFloat(coord));
+					const txt = segment.activity.topCandidate.type;
+					const dt = segment.activity.distanceMeters;
+					// Actionsに追加
+					Actions.push({stime:stime, etime:etime, act:1,
+							txt:txt, col:1, dt:dt});
+					acount++;	// Actionsのオブジェクト数++
+					// Timelineにstart/end時間と地点を追加
+					Timeline.push({time:stime, lat:slat, lng:slng, col:1});
+					Timeline.push({time:etime, lat:elat, lng:elng, col:1});
+				}
+			}
+		}
+	});
+	// visitもactivityもなくて最後の訪問地に存在したままになっている日は
+	if (lastvisit && !acount &&
+			lastsdate <= targetdateStr && targetdateStr <= lastedate) {
+		const [lat, lng] =
+			lastvisit.topCandidate.placeLocation.latLng.
+				split("°, ").map(coord => parseFloat(coord));
+		const txt = lastvisit.topCandidate.semanticType;
+		// 最後の訪問地を追加
+		Actions.push({stime:0, etime:0,	act:0, txt:txt,
+							lat:lat, lng:lng,col:1});
+		Timeline = [];	// Timelineデータをクリア
+	}
+
+	// Timelineを時刻でソート
+	Timeline.sort((a, b) => a.time - b.time);
+
+	// Actionsのvisit(actが0のもの)期間のtimelineデータを捨てる
+	let visit = Actions.filter(action => action.act === 0);
+	// Timeline をフィルタリングしてvisit期間中のデータを削除
+	let filteredTimeline = Timeline.filter(entry => {
+		let time = entry.time;
+		return !visit.some(({stime, etime}) => stime < time && time < etime);
+	})
+	Timeline = filteredTimeline;	// Timelineを更新
+
+	// Timelineのtype(線種)を差し替える
+	ReplaceLineType();
+	// 移動手段を日本語に変換
+	ReplaceMovingMethod();
+	// visit地点の名称を差し替える
+	ReplaceVisitPlaceName();
+
+	// YahooAPIを呼んだ場合は訪問地の名称は後で描画するのでここではやらない
+	if (!fDrawLater) {
+		// YahooAPIを呼んでないならここで描画
+		DrawVisitPoint();		// 訪問地の番号と名称をマップに描画
+		UpdateActionsList();	// 行動履歴リストの更新
+	}
+//	console.log("filterTimeline:", filteredTimeline);
+//	console.log("Timeline:", Timeline);
+//	console.log("Actions:", Actions);
+}
+// タイムラインの表示
+function TimeLineDisplay() {
+
+	// jsonデータの解析
+	ParseData();
+
+	// 既存のラインを削除
+	if (polylineLayers.length) {
+		polylineLayers.forEach(layer => map.removeLayer(layer));
+		polylineLayers = []; // リストをクリア
+	}
+
+	// visitもactivityもないなら何もしない
+	if (Actions.length === 0) {
+		return;
+	}
+	// Actions全ての地点を含むバウンディングボックスを計算
+	let bounds = L.latLngBounds(
+		Actions.
+		filter(action => action.act === 0).		// visitのデータを抽出
+		map(action => [action.lat, action.lng])	// latとlng を座標に変換
+	);
+	// Timelineに地点データがあるなら
+	if (Timeline) {
+		// Timeline全ての地点を含むバウンディングボックスを計算
+		let bounds2 = L.latLngBounds(Timeline.map(
+							item => [item.lat, item.lng]));
+		bounds = bounds.extend(bounds2);	// バウンディングボックスを拡張
+	}
+	map.fitBounds(bounds);	// マップのサイズ変更
+
+	// マップにラインを追加
+	let latLngs = [];
+	let polyline;
+
+	// ラインを描画
+	for (let i = 0; i < Timeline.length - 1; i++) {
+		let latlngs = [
+			[Timeline[i].lat, Timeline[i].lng],
+			[Timeline[i + 1].lat, Timeline[i + 1].lng]
+		];
+		let lineType = Timeline[i].col;
+		let color = colorMap[lineType] || "blue"; // デフォルト青
+		let dashArray = lineType === 0 ? "3, 10" : null; // type=0なら破線
+
+		// ポリラインを地図に追加
+		polyline = L.polyline(latlngs, {
+			color: color,
+			weight: 5,
+			dashArray: dashArray
+		}).addTo(map);
+		polylineLayers.push(polyline);
+	}
+}
+// 文字列の表示サイズを取得
+function getTextSize(text, fontSize) {
+	// Canvasを使って文字サイズを測定
+	const canvas = document.createElement('canvas');
+	const context = canvas.getContext('2d');
+	context.font = `${fontSize}px sans-serif`; // フォントを指定
+	const width = context.measureText(text).width;
+	const height = fontSize; // 高さはフォントサイズでOK
+
+	return [width, height];
+}
+// 訪問地の番号と名称をマップに描画
+function DrawVisitPoint() {
+	// 過去の描画を削除
+	if (visitLayers.length) {
+		visitLayers.forEach(layer => map.removeLayer(layer));
+		visitLayers = []; // リストをクリア
+	}
+
+	let index = 1; // 番号の初期値
+
+	Actions.forEach(action => {
+		if (action.act === 0) {	// visitなら
+			// 番号ラベルを表示
+			let label = L.divIcon({
+				className: 'circle-label',
+				html: `<div style="
+					display: flex;
+					align-items: center;
+					justify-content: center;
+					width: 20px; /* サイズ固定 */
+					height: 20px; 
+					font-size: 12px;
+					font-weight: bold;
+					color: white;
+					background-color: blue; /* 透け防止 */
+					border-radius: 50%; /* 丸くする */
+					text-align: center;
+				">${index}</div>`,
+				iconSize: [20, 20],  // サイズ調整
+				iconAnchor: [10, 10] // 中央配置
+			});
+			let marker = L.marker([action.lat, action.lng],
+							{ icon: label }).addTo(map);
+			visitLayers.push(marker);
+
+			const size = getTextSize(action.txt, 14);
+			// テキストラベルを表示（背景付きで透け防止）
+			let textLabel = L.divIcon({
+				className: 'text-label',
+				html: `<div style="
+					font-size: 14px; 
+					color: blue; 
+					background-color: rgba(255, 255, 255, 0.7);
+					border: 1px solid gray; /* 境界線 */
+					border-radius: 8px; /* 角丸 */
+					white-space: nowrap; /* 折り返し防止 */
+					width: ${size[0] + 12}px; /* widthを明示 */
+					height: ${size[1]}px; /* heightを明示 */
+					line-height: ${size[1]}px; /* 縦中央寄せ */
+				">&nbsp;${action.txt}</div>`,
+				iconAnchor: [-12, 10] /* 少し横にずらす */
+			});
+			let textMarker = L.marker([action.lat, action.lng],
+								{ icon: textLabel }).addTo(map);
+			visitLayers.push(textMarker);
+
+			index++; // 番号を増加
+		}
+	});
+}
+// 数字を丸数字（①, ②, ③... ㊿）に変換する
+function convertToCircledNumber(number) {
+	const circledNumbers = [
+		'①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩',
+		'⑪', '⑫', '⑬', '⑭', '⑮', '⑯', '⑰', '⑱', '⑲', '⑳',
+		'㉑', '㉒', '㉓', '㉔', '㉕', '㉖', '㉗', '㉘', '㉙', '㉚',
+		'㉛', '㉜', '㉝', '㉞', '㉟', '㊱', '㊲', '㊳', '㊴', '㊵',
+		'㊶', '㊷', '㊸', '㊹', '㊺', '㊻', '㊼', '㊽', '㊾', '㊿'
+	];
+	// 1～50の範囲なら丸数字、それ以外はそのまま
+	return circledNumbers[number - 1] || number;
+}
+// 行動履歴リストの更新
+function UpdateActionsList() {
+
+	// #list-boxの内容をクリア
+	const listBox = document.getElementById("list-box");
+	listBox.innerHTML = "";
+	let visitIndex = 1; // 訪問地の連番
+
+	Actions.forEach((action, index, arr) => {
+		let time;
+		// 1970-01-01からの秒数をミリ秒に変換
+		if (index === 0) {	// リストの先頭なら
+			time = new Date(action.etime * 1000);	// 出発時刻
+		} else {	// リストの先頭以外は
+			time = new Date(action.stime * 1000);	// 到着時刻
+		}
+		// 時刻をhh:mmの文字に変換
+		let timeString = `${String(time.getHours()).padStart(2, '0')}:` +
+			`${String(time.getMinutes()).padStart(2, '0')}`;
+		// 経過時間
+		let elapsedSeconds = action.etime - action.stime;
+		let elapsed;
+		if (elapsedSeconds < 3600) {	// 1時間未満なら
+			elapsed = `${Math.floor(elapsedSeconds / 60)}分`;	// "m分"
+		} else {	// 1時間以上なら
+			let hours = Math.floor(elapsedSeconds / 3600);
+			let minutes = Math.floor((elapsedSeconds % 3600) / 60);
+			elapsed = `${hours}時間${minutes}分`;				// "h時間m分"
+		}
+
+		let listItemContent = "";
+		let textColor = "";
+		let backgroundColor = "";
+		if (action.act === 0) { // visitなら
+			// 丸数字に変換
+			let circledNumber = convertToCircledNumber(visitIndex);
+			if (arr.length === 1 ) {	// visitが1つだけなら
+				listItemContent = `終日&nbsp;&nbsp;&nbsp;&nbsp;` +
+					`${circledNumber}${action.txt}`;	// 終日と表示
+			} else {
+				listItemContent = `${timeString}&nbsp;&nbsp;${circledNumber}`+
+								  `${action.txt}`;
+				if (!(index === 0 || index === arr.length - 1)) {
+				listItemContent +=
+					`<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;` +
+					`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;` +
+					`${elapsed}`;	// 滞在時間を表示
+				}
+			}
+			textColor = "black";			// 文字色
+			backgroundColor = "lightblue";	// 背景色
+			textStyle = "bold";
+			visitIndex++;
+		} else if (action.act === 1) { // activityなら
+			let distance = action.dt;
+			let dist = distance < 1000 ?
+				 `${Math.floor(distance)}m` :
+				 `${(distance / 1000).toFixed(1)}km`;
+			listItemContent = `${timeString}` +
+				`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↓&nbsp;` +
+				`${action.txt}&nbsp;&nbsp;${dist}&nbsp;&nbsp;${elapsed}`;
+			textColor = colorMap[action.col];	// 文字色
+			backgroundColor = "";				// 背景色
+			textStyle = "";
+		}
+
+		// 新しいリストアイテムを作成
+		const listItem = document.createElement("div");
+		listItem.style.color = textColor; // テキストの色を設定
+		listItem.style.backgroundColor = backgroundColor; // 背景色を設定
+		listItem.style.fontWeight = textStyle;
+		listItem.classList.add("list-item");
+		// 改行を反映させるため innerHTML を使用
+		listItem.innerHTML = listItemContent;
+
+		// リストに追加
+		listBox.appendChild(listItem);
+	});
+}
+// 先頭からの文字を削除
+function removePrefix(name, prefix) {
+	return name.startsWith(prefix) ? name.slice(prefix.length) : name;
+}
+// 末尾からの文字を削除
+function removeSuffix(name, suffix) {
+	return name.endsWith(suffix) ? name.slice(0, -suffix.length) : name;
+}
+// 先頭と末尾からの文字を削除
+function remove2(name, prefix, suffix) {
+	return removeSuffix(removePrefix(name, prefix), suffix);
+}
+// visit地点の名称を検索して変更する
+function ChangePlaceName(lat, lng, index) {
+
+	// 動的にコールバック関数を作成
+	const callbackName = `GetResult_${index}`;
+	window[callbackName] = function (result) {
+		// エラーレスポンスの処理
+		if (result?.Error) {
+			console.error(
+				`API error for index ${index}:`, result.Error.Message);
+			Actions[index].txt = "訪問地点";
+			DrawVisitPoint();		// 訪問地の番号と名称をマップに描画
+			UpdateActionsList();	// 行動履歴リストの更新
+			delete window[callbackName];
+			return;
+		}
+		// コールバックで呼ばれたら
+		if (result?.ResultSet?.Result?.length > 0) {
+			let name;
+			let name1 = "", name2 = "";
+			let score1 = 0, score2 = 0;
+			// 最初の項目
+			if (result.ResultSet.Result[0]?.Name) {
+				name1 = result.ResultSet.Result[0].Name;
+				score1 = result.ResultSet.Result[0].Score;
+			}
+			// 2番目の項目
+			if (result.ResultSet.Result[1]?.Name) {
+				name2 = result.ResultSet.Result[1].Name;
+				score2 = result.ResultSet.Result[1].Score;
+			}
+			// 2番目がそこそこ正しくて駅だったら
+			if (score2 > 70 && name2.includes("駅")) {
+				name = name2;	// 2番目の名称を採用
+				score1 = score2;
+			} else {
+				name = name1;
+			}
+
+			// Yahoo場所情報APIから得られる名称を修正(店舗名を削除)
+			if (name) {
+				// 直接一致する名前をマッピング
+				const nameMap = {
+					"ニューデイズエキュート赤羽店": "赤羽駅",
+					"Emio池袋": "池袋駅",
+					"上野精養軒本店": "上野恩賜公園",
+					"上野恩賜公園正岡子規記念球場": "上野恩賜公園",
+					"アパホテル&リゾート両国駅タワー": "両国国技館",
+					"ゆうちょ銀行さいたま支店ロブレビル内出張所": "ロブレ",
+					"台東区立上野中学校": "東京国立博物館 平成館",
+					"ゆうちょ銀行本店西武池袋線池袋駅内出張所": "西武池袋"
+				};
+				// 部分一致でマッピング
+				const patternMap = [
+					{ pattern: "Glocal Food Bazaarイクスピアリ",
+					  replacement: "東京ディズニーリゾート" }
+				];
+				// 直接一致を処理
+				name = nameMap[name] ||
+					patternMap.find(
+					({ pattern }) => name.includes(pattern))?.replacement ||
+					name;
+				// ニューデイズとエキュートは駅にのみ存在している
+				if (name.includes("ニューデイズ") ||
+					name.includes("エキュート")) {
+						name = name.replace(/^ニューデイズ|^エキュート/, '');
+						if (name.length <= 4) name += '駅';
+				}
+				
+				// 削除する店名
+				const storeNames = [
+					"無印良品500", "フレッシュネスバーガー", "モスバーガー",
+					"マクドナルド",	"クリスピー・クリーム・ドーナツ",
+					"サブウェイ", "サイゼリヤ",	"ケンタッキーフライドチキン",
+					"セブンイレブン", "ファミリーマート", "ファミマ",
+					"ナチュラルローソン", "ローソン", "ワッツウィズ",
+					"マツモトキヨシ", "セイコーマート", "マックスバリュ",
+					"ウエルシア", "ココカラファイン","ハートイン",
+					"ホームセンター", "コーナン", "キヨスク", "アバンセekie",
+					"ビッグボーイ", "餃子の王将", "サンドラッグ", "ダイソー",
+					"ケーズデンキ","ロッテリア","吉野家","ミニストップ",
+					"サクマ", "デイリーヤマザキ", "ツルハドラッグ",
+					"成城石井SELECT", "KoKuMiN", "CoCo壱番屋", "肉の万世",
+					"サンマルクカフェ", "スギドラッグ"
+				];
+				// 先頭の店名と末尾に'店'があるなら削除
+				storeNames.forEach(store => {
+					name = remove2(name, store, "店");
+				});
+				// 一致スコアが低いなら
+				if (score1 < 50.0) {
+					name += "付近";	// 末尾に'付近'を追加
+				}
+			// Yahooの地図にない場合
+			} else if (result.ResultSet.Result[0]?.Where) {
+				name = result.ResultSet.Result[0].Where;
+			} else {
+				name = "訪問地点";
+			}
+			Actions[index].txt = name;
+		} else {
+			Actions[index].txt = "訪問地点";
+		}
+
+		// すべてのデータが取得されたかチェックして再描画
+		if (Actions.every(action => action.txt !== "UNKNOWN")) {
+			DrawVisitPoint();		// 訪問地の番号と名称をマップに描画
+			UpdateActionsList();	// 行動履歴リストの更新	
+		}
+
+		// 使い終わったら削除
+		delete window[callbackName];
+	};
+
+	// Yahoo場所情報APIのURL
+	const url = `https://map.yahooapis.jp/placeinfo/V1/get?appid=${APPID}`
+		+ `&lat=${lat}&lon=${lng}&dist=0.1&output=json`
+		+ `&callback=${callbackName}`;
+
+	const target = document.createElement('script');
+	target.charset = 'utf-8';
+	target.src = url;
+	target.onerror = () => {
+		console.error(`Failed to load API script for index ${index}`);
+		Actions[index].txt = "訪問地点";
+		DrawVisitPoint();		// 訪問地の番号と名称をマップに描画
+		UpdateActionsList();	// 行動履歴リストの更新	
+		delete window[callbackName];
+	};
+
+	document.body.appendChild(target);
+}
+// Actionsオブジェクトのvisit地点の名称を差し替える
+function ReplaceVisitPlaceName() {
+	let i = 0;
+	fDrawLater = false;
+	Actions.forEach(action => {
+		if (action.act === 0) {	// visitなら
+			if (action.txt.includes('HOME')) {
+				action.txt = '自宅';
+			} else if (action.txt === "WORK") {
+				action.txt = "職場";
+			} else {
+				// visit地点の名称を検索して変更する
+				if (APPID.length !== 0) {	// YahooAPIを使うなら
+					action.txt = "UNKNOWN";	// HOMEとWORK以外は未知として検索
+					fDrawLater = true;		// 画面の描画は後で
+					ChangePlaceName(action.lat, action.lng, i);
+				} else {
+					action.txt = "訪問地点";
+				};
+			}
+		}
+		i++;
+	});
+}
+// Timelineオブジェクトのtype(線種)を差し替える
+function ReplaceLineType() {
+	Timeline.forEach(entry => {
+		Actions.forEach(action => {
+			if (action.act === 1 &&	// activityなら
+				action.stime <= entry.time && entry.time <= action.etime) {
+
+				if (action.txt === "WALKING") {
+					entry.col = 0;
+				} else if (action.txt === "CYCLING" ||
+							action.txt === "RUNNING" ||
+							action.txt === "SKIING") {
+					entry.col = 2;
+				} else if (action.txt === "IN_TRAIN" ||
+							action.txt === "IN_SUBWAY") {
+					entry.col = 3;
+				} else if (action.txt === "FLYING" ||
+							action.txt === "IN_GONDOLA_LIFT" ||
+							action.txt === "IN_FERRY") {
+					entry.col = 4;
+				}
+			}
+		});
+	});
+}
+// 移動手段を日本語に変換し色も設定
+function ReplaceMovingMethod() {
+	Timeline.forEach(entry => {
+		Actions.forEach(action => {
+			if (action.act === 1 &&	// activityなら
+				action.stime <= entry.time && entry.time <= action.etime) {
+
+				if (action.txt === "IN_PASSENGER_VEHICLE") {
+					action.txt = "車";
+				} else if (action.txt === "MOTORCYCLING") {
+					action.txt = "バイク";
+				} else if (action.txt === "UNKNOWN_ACTIVITY_TYPE") {
+					action.txt = "移動";
+				} else if (action.txt === "WALKING") {
+					action.txt = "徒歩";
+					action.col = 0;
+				} else if (action.txt == "CYCLING") {
+					action.txt = "自転車";
+					action.col = 2;
+				} else if (action.txt === "RUNNING") {
+					action.txt = "ジョギング";
+					action.col = 2;
+				} else if (action.txt === "SKIING") {
+					action.txt = "スキー";
+					action.col = 2;
+				} else if (action.txt == "IN_TRAIN") {
+					action.txt = "電車";
+					action.col = 3;
+				} else if (action.txt == "IN_BUS") {
+					action.txt = "バス";
+				} else if (action.txt == "IN_SUBWAY") {
+					action.txt = "地下鉄";
+					action.col = 3;
+				} else if (action.txt === "FLYING") {
+					action.txt = "飛行機";
+					action.col = 4;
+				} else if (action.txt == "IN_FERRY") {
+					action.txt = "船";
+					action.col = 4;
+				} else if (action.txt == "IN_GONDOLA_LIFT") {
+					action.txt = "ゴンドラ";
+					action.col = 4;
+				}
+			}
+		});
+	});
+}
+// 各日の総移動距離を求める(月のTimelineの距離を日ごとに累積)
+function GetTotalDistance() {
+	// jsonDataが空または未定義の場合は、処理を終了する
+	if (!jsonData || !jsonData.semanticSegments ||
+			jsonData.semanticSegments.length === 0) {
+		return;
+	}
+
+	// JSON内のsemanticSegmentsデータを取得
+	const semanticSegments = jsonData.semanticSegments || [];
+	Distance = [];
+	for (d = 1; d <= 31; d++) {
+		// 2桁にするために `padStart(2, '0')` を使う
+		let dateStr = `${currentYear}-`+
+					  `${String(currentMonth).padStart(2, '0')}-`+
+					  `${String(d).padStart(2, '0')}`;
+		let dateStr1 = `${currentYear}-${currentMonth}-${String(d)}`;
+		let distance = 0.0;	// 総距離
+		semanticSegments.forEach(segment => {
+			// その日のデータ
+			if (segment.endTime.includes(dateStr)) {
+				// activityがあるなら
+				if (segment.activity) {
+					distance += segment.activity.distanceMeters; // 距離を加算
+				}
+				// visitかtimelinePathがあるなら
+				else if (segment.visit || segment.timelinePath) {	
+					distance += 1.0;	// とりあえず1mは動いたという事にする
+				}
+			}
+		});
+
+		Distance.push({date:dateStr1, value:distance});
+	}
+	// Distanceを表示する（デバッグ用）
+	//console.log(Distance);
+}
+// テスト
+function testTimeLineDisplay() {
+	// 開始日と終了日を設定
+	const startDate = new Date(2024, 11, 31); // 月は0から始まるため、11は12月
+	const endDate = new Date(2012, 0, 1); // 0は1月
+
+	// 現在の日付を開始日で初期化
+	const currentDate = startDate;
+
+	const interval = 2000; // 2秒間隔
+
+	const timer = setInterval(() => {
+		// 日付が終了日を過ぎたら停止
+		if (currentDate < endDate) {
+			clearInterval(timer);
+			console.log("テスト完了");
+			return;
+		}
+
+		// 日付を "yyyy-m-d" の形式でセット
+		const year = currentDate.getFullYear();
+		const month = currentDate.getMonth() + 1; // 月は0始まりなので+1
+		const day = currentDate.getDate();
+		selectedDate = `${year}-${month}-${day}`;
+
+		try {
+			console.log(`現在のテスト日付: ${selectedDate}`);
+			TimeLineDisplay();	// タイムラインの表示
+		} catch (error) {
+			console.error(`エラー発生: ${error.message}`);
+			clearInterval(timer);	// エラーが発生したら停止
+			return;
+		}
+
+		// 1日減らす
+		currentDate.setDate(currentDate.getDate() - 1);
+	}, interval);
+}
+});
+//----------------------------------------------------------------------------
+</script>
+</html>
