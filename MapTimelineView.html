@@ -6,6 +6,8 @@
 *	MapTimelineView.html -- Googleマップからエクスポートしたタイムラインを表示
 *
 *	rev1.0	2025/03/12	initial revision by	Toshi
+*	rev1.1	2025/08/21	タイプミス修正＆KAYAKINGも船に
+*	rev1.2	2026/03/26	OSMからの403エラー頻度低減
 *
 *****************************************************************************/
 -->
@@ -16,13 +18,12 @@
 
 <head>
 	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0" +
-				"initial-scale=1.0, maximum-scale=1.0, user-scalable=no" >
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" >
 	<title>MapTimelineView</title>
 	<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 	<link rel=
-	  "stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
-	<script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+	  "stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+	<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 
 <style>
@@ -120,7 +121,7 @@
 		top: 50%;
 		left: 50%;
 	border-radius: 50%;
-		background-color: rgba(0,0, 255, 0.2); !important;
+		background-color: rgba(0,0, 255, 0.2) !important;
 		transform: translate(-50%, -50%);
 		pointer-events: none; /* クリックを邪魔しない */
 		z-index: 1; /* 数字より後ろに配置 */
@@ -166,11 +167,13 @@ $(function () {
 	let polylineLayers = []; // 描画した線のレイヤ
 	let visitLayers = [];	// 描画した訪問地のレイヤ
 	let firstDay;
-	let lastDay;
+	let lastDate;
 	let today = new Date();
 	let currentYear = today.getFullYear();
 	let currentMonth = today.getMonth() + 1;
 	let fDrawLater;		// visitポイントを後で描画するフラグ
+	let lastBounds = null;
+
 	// 線種ごとの色設定
 	const colorMap =
 			{ 0:"black", 1:"blue", 2:"green", 3:"purple", 4:"red" };
@@ -184,8 +187,32 @@ $(function () {
 	// Leafletマップの初期化
 	let map =
 		L.map("map-area").setView([35.6895, 139.6917], zoomLevel);
+
+	// ★OSMのタイルサーバーを使うならこちら
 	L.tileLayer(
-	 "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+		// フランスのサーバーに変更
+//		'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+		"https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+		{
+			attribution: '&copy; OpenStreetMap contributors',
+			className: 'map-tiles',
+			referrerPolicy: 'strict-origin-when-cross-origin',
+			animate: false,
+			updateWhenIdle: true,
+			maxZoom: 17,
+			zoomSnap: 1,
+			zoomDelta: 1,
+			keepBuffer: 2,
+			detectRetina: false,
+			updateWhenZooming: false,
+			reuseTiles: true
+		 }).addTo(map);
+
+	// ★国土地理院のタイルサーバーを使うならこちら
+//	L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+//		attribution: '© 国土地理院',
+//		maxZoom: 17
+//	}).addTo(map);
 
 //----------------------------------------------------------------------------
 
@@ -265,7 +292,6 @@ function readJsonFile(file) {
 		generateCalendar(currentYear, currentMonth);	// カレンダーの表示
 	};
 	reader.readAsText(file);
-	//testTimeLineDisplay();
 }
 // カレンダーの表示
 function generateCalendar(year, month) {
@@ -403,7 +429,7 @@ function ParseData() {
 									act:0, txt:txt, lat:lat, lng:lng, col:1});
 					acount++;	// Actionsのオブジェクト数++
 					// Timelineに追加
-					if (Actions.lengh) { //初回なら
+					if (Actions.length) { //初回なら
 						// Timelineにはendtimeを追加
 						Timeline.push({time:etime, lat:lat, lng:lng, col:1});
 					} else {	// Timelineにはstarttimeを追加
@@ -504,7 +530,11 @@ function TimeLineDisplay() {
 							item => [item.lat, item.lng]));
 		bounds = bounds.extend(bounds2);	// バウンディングボックスを拡張
 	}
-	map.fitBounds(bounds);	// マップのサイズ変更
+	if (!lastBounds || !lastBounds.equals(bounds)) {
+		// マップのサイズ変更
+		map.fitBounds(bounds);
+		lastBounds = bounds;
+	}
 
 	// マップにラインを追加
 	let latLngs = [];
@@ -877,6 +907,7 @@ function ReplaceLineType() {
 					entry.col = 3;
 				} else if (action.txt === "FLYING" ||
 							action.txt === "IN_GONDOLA_LIFT" ||
+							action.txt === "KAYAKING" ||
 							action.txt === "IN_FERRY") {
 					entry.col = 4;
 				}
@@ -923,6 +954,9 @@ function ReplaceMovingMethod() {
 				} else if (action.txt == "IN_FERRY") {
 					action.txt = "船";
 					action.col = 4;
+				} else if (action.txt == "KAYAKING") {
+					action.txt = "船";
+					action.col = 4;
 				} else if (action.txt == "IN_GONDOLA_LIFT") {
 					action.txt = "ゴンドラ";
 					action.col = 4;
@@ -967,44 +1001,6 @@ function GetTotalDistance() {
 	}
 	// Distanceを表示する（デバッグ用）
 	//console.log(Distance);
-}
-// テスト
-function testTimeLineDisplay() {
-	// 開始日と終了日を設定
-	const startDate = new Date(2024, 11, 31); // 月は0から始まるため、11は12月
-	const endDate = new Date(2012, 0, 1); // 0は1月
-
-	// 現在の日付を開始日で初期化
-	const currentDate = startDate;
-
-	const interval = 2000; // 2秒間隔
-
-	const timer = setInterval(() => {
-		// 日付が終了日を過ぎたら停止
-		if (currentDate < endDate) {
-			clearInterval(timer);
-			console.log("テスト完了");
-			return;
-		}
-
-		// 日付を "yyyy-m-d" の形式でセット
-		const year = currentDate.getFullYear();
-		const month = currentDate.getMonth() + 1; // 月は0始まりなので+1
-		const day = currentDate.getDate();
-		selectedDate = `${year}-${month}-${day}`;
-
-		try {
-			console.log(`現在のテスト日付: ${selectedDate}`);
-			TimeLineDisplay();	// タイムラインの表示
-		} catch (error) {
-			console.error(`エラー発生: ${error.message}`);
-			clearInterval(timer);	// エラーが発生したら停止
-			return;
-		}
-
-		// 1日減らす
-		currentDate.setDate(currentDate.getDate() - 1);
-	}, interval);
 }
 });
 //----------------------------------------------------------------------------
